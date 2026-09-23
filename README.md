@@ -88,8 +88,14 @@ Q=min(out/in,in/out) используется только для non-seed с п
 
 Входящий/исходящий degree даёт структурное приближение authority/hub без
 добавления отдельного нестабильного спектрального алгоритма.
-У depth=4 && out_deg=0 score_terminal=0: независимого свидетельства остановки
-денег в этих входах нет. Seed обрабатываются отдельной формулой из-за неполного
+Данные censored на четвёртом колене: обход здесь заканчивается, и у всех 444
+depth=4 узлов out_deg=0. Отсутствие наблюдаемого исходящего ребра не доказывает
+retention (остановку денег). Поэтому classifier не использует это отсутствие
+как terminal evidence: при truncated_by_depth score_terminal=0.
+Terminal/non-terminal status по отсутствию выхода неидентифицируем из этой
+censored выгрузки. Эти узлы не объявляются доказанно non-terminal: реальный
+downstream по предоставленным данным неизвестен и не восстанавливается.
+Seed обрабатываются отдельной формулой из-за неполного
 наблюдаемого входа. Для isolated node все основные scores равны 0, peripheral=1.
 
 Scores округляются до 10 знаков, выбирается максимум. Явный порядок равенств:
@@ -108,8 +114,29 @@ communities сортируются по минимальному gid, затем
 Внутренний объём кластера считается по исходным направленным рёбрам, каждое
 ровно один раз. `top_gids` — JSON-массив до 5 gid по убыванию betweenness,
 затем PageRank, затем возрастанию gid (метрики округлены до 10 знаков).
-`hypothesis` отражает распределение ролей, внутреннюю сумму и число truncated
-узлов конкретного кластера; это структурная гипотеза для проверки.
+`hypothesis` — структурно-функциональная гипотеза о назначении community,
+основанная только на уже назначенных ролях и наблюдаемых потоках.
+`dominant_role` — роль с максимальным count; равенства разрешаются строго по
+ROLES order: consolidator, transit, distributor, terminal, coordinator, peripheral.
+`dominant_share` = dominant count / n_nodes, формат с 10 знаками после точки.
+Соответствие dominant role → category:
+
+| Роль | Category |
+|---|---|
+| consolidator | collection-oriented |
+| transit | transit-oriented |
+| distributor | distribution-oriented |
+| terminal | terminal/retention-oriented |
+| coordinator | coordination/bridging-oriented |
+| peripheral | peripheral/isolated |
+
+Singleton с in_deg=out_deg=0 получает category=peripheral/isolated.
+При этом правиле ориентация всегда определена; mixed и дополнительные пороги
+не используются. Строка также содержит counts всех шести ролей (включая нулевые)
+в ROLES order, internal KZT с 2 знаками после точки и truncated count.
+Фиксированные форматирование и tie-break обеспечивают независимость от порядка
+строк. Окончание `structural hypothesis only` подчёркивает, что это гипотеза,
+а не вывод о преступной деятельности или доказанной незаконности community.
 
 V=P(in_kzt+out_kzt), F=P(in_tx+out_tx).
 `priority = 0.35·B + 0.15·R + 0.25·V + 0.15·F + 0.10·T·F`.
@@ -132,15 +159,21 @@ Top N=30, порядок: округлённый priority убывает, gid в
 сумм, состав top_gids, последовательные ranks, сортировка и совпадение top scores.
 Отдельно проверяются orphan nodes, запрет terminal при truncation и маска ratio.
 
-8 тестов проверяют также направленные агрегаты против parquet, weight=None
+9 тестов проверяют также направленные агрегаты против parquet, weight=None
 для betweenness, временной сигнал независимым подсчётом и примером с прошлым/
 тем же/следующим днём, неизменность всех role scores при изменении ratio seed
 и undefined, PageRank fallback, ошибочные суммы/числа переводов и повторяемость.
+Тест hypothesis проверяет категории доминирующих ролей, singleton isolate,
+все попарные равенства максимумов, долю, численные evidence и неизменность строки
+при повторном вызове и перестановке узлов кластера. Validation проверяет hypothesis
+каждого кластера до записи и после чтения CSV.
 Повторный расчёт с переставленными строками всех трёх входов даёт идентичные
 таблицы и SHA-256 сериализованных CSV. Выходная точность 10 знаков, LF.
 
 Фактический результат: 2248 узлов, 88 кластеров, 30 top nodes; все 19 isolates
-сохранены; evidence до 134 символов; все 444 truncated узла без terminal.
+сохранены; evidence до 134 символов; все 444 truncated узла не классифицированы
+как terminal из-за отсутствия независимого downstream evidence, что не доказывает
+их фактический non-terminal status.
 Роли: peripheral 1431, consolidator 248, terminal 247, coordinator 198,
 distributor 111, transit 13. Эти количества — результат, не цель настройки.
 

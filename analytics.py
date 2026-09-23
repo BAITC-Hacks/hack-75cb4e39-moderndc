@@ -10,6 +10,14 @@ import pandas as pd
 SEED = 42
 PRECISION = 10
 TOP_N = 30
+ROLE_CATEGORIES = {
+    "consolidator": "collection-oriented",
+    "transit": "transit-oriented",
+    "distributor": "distribution-oriented",
+    "terminal": "terminal/retention-oriented",
+    "coordinator": "coordination/bridging-oriented",
+    "peripheral": "peripheral/isolated",
+}
 
 
 def percentile(values):
@@ -117,6 +125,20 @@ def evidence(row):
             + f"; is_seed={int(row.is_seed)}")
 
 
+def cluster_hypothesis(group, internal_kzt, roles):
+    """Ориентация по модальной назначенной роли; равенства разрешает ROLES order."""
+    counts = group.role.value_counts().reindex(roles, fill_value=0)
+    shares = counts / len(group)
+    dominant = max(roles, key=lambda role: int(counts[role]))
+    isolated = len(group) == 1 and bool(((group.in_deg == 0) & (group.out_deg == 0)).all())
+    category = "peripheral/isolated" if isolated else ROLE_CATEGORIES[dominant]
+    distribution = ", ".join(f"{role}={int(counts[role])}" for role in roles)
+    return (f"category={category}; dominant_role={dominant}; "
+            f"dominant_share={shares[dominant]:.10f}; roles: {distribution}; "
+            f"internal={internal_kzt:.2f} KZT; truncated={int(group.truncated_by_depth.sum())}; "
+            "structural hypothesis only")
+
+
 def build_outputs(G, df, tx, roles):
     df = df.copy()
     assert set(G) == set(df.gid)
@@ -157,11 +179,7 @@ def build_outputs(G, df, tx, roles):
         # Структурное значение: betweenness, затем PageRank, затем точный int gid.
         leaders = group.sort_values(["betweenness", "pagerank", "gid"],
                                    ascending=[False, False, True]).gid.head(5).tolist()
-        counts = group.role.value_counts()
-        distribution = ", ".join(f"{r}={int(counts[r])}" for r in roles if r in counts)
-        hypothesis = (f"Observed roles: {distribution}; internal={internal[cid]:.2f} KZT; "
-                      f"truncated={int(group.truncated_by_depth.sum())}. "
-                      "Structural grouping; requires contextual review.")
+        hypothesis = cluster_hypothesis(group, internal[cid], roles)
         clusters.append({"cluster_id": cid, "n_nodes": len(group),
                          "n_seed": int(group.is_seed.sum()), "sum_kzt_internal": internal[cid],
                          "top_gids": json.dumps(leaders), "hypothesis": hypothesis})
@@ -212,6 +230,7 @@ def validate_outputs(df, clusters, top, nodes, edges, roles):
         expected = group.sort_values(["betweenness", "pagerank", "gid"],
                                      ascending=[False, False, True]).gid.head(5).tolist()
         assert leaders == expected and len(leaders) > 0
+        assert row.hypothesis == cluster_hypothesis(group, row.sum_kzt_internal, roles)
     minima = df.groupby("cluster_id").gid.min().tolist()
     assert minima == sorted(minima), "Неканонические cluster ids"
     assert len(top) == min(TOP_N, len(nodes)) and len(top) >= 20

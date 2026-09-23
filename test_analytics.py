@@ -124,6 +124,42 @@ class CaseTests(unittest.TestCase):
             with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(AssertionError):
                 starter.sanity_check(broken, self.nodes, self.tx)
 
+    def test_cluster_hypothesis_selection(self):
+        categories = ["collection-oriented", "transit-oriented", "distribution-oriented",
+                      "terminal/retention-oriented", "coordination/bridging-oriented",
+                      "peripheral/isolated"]
+        cases = [([role, "peripheral", role], role, category, False)
+                 for role, category in zip(starter.ROLES[:-1], categories[:-1])]
+        cases.append((["peripheral"], "peripheral", "peripheral/isolated", True))
+        # Каждая пара ролей с равным максимумом, вход в обратном ROLES порядке.
+        cases.extend(([later, earlier], earlier, categories[i], False)
+                     for i, earlier in enumerate(starter.ROLES)
+                     for later in starter.ROLES[i + 1:])
+        for assigned, expected_role, expected_category, isolated in cases:
+            with self.subTest(assigned=assigned):
+                group = pd.DataFrame({"role": assigned, "in_deg": 0 if isolated else 1,
+                                      "out_deg": 0 if isolated else 1,
+                                      "truncated_by_depth": [False] * (len(assigned) - 1) + [not isolated]})
+                amount = 0.0 if isolated else 1729.25
+                result = analytics.cluster_hypothesis(group, amount, starter.ROLES)
+                parts = result.split("; ")
+                fields = dict(part.split("=", 1) for part in parts[:3])
+                self.assertEqual(fields["category"], expected_category)
+                self.assertEqual(fields["dominant_role"], expected_role)
+                share = assigned.count(expected_role) / len(assigned)
+                self.assertAlmostEqual(float(fields["dominant_share"]), share, places=10)
+                self.assertEqual(fields["dominant_share"], f"{share:.10f}")
+                counts = [(role, assigned.count(role)) for role in starter.ROLES]
+                parsed = [(role, int(count)) for role, count in
+                          (item.split("=") for item in parts[3].removeprefix("roles: ").split(", "))]
+                self.assertEqual(parsed, counts)
+                self.assertEqual(parts[4], f"internal={amount:.2f} KZT")
+                self.assertEqual(parts[5], f"truncated={int(not isolated)}")
+                self.assertEqual(parts[6], "structural hypothesis only")
+                self.assertRegex(result, r"\d")
+                self.assertEqual(result, analytics.cluster_hypothesis(group, amount, starter.ROLES))
+                self.assertEqual(result, analytics.cluster_hypothesis(group.iloc[::-1], amount, starter.ROLES))
+
     def test_repeat_and_input_order_determinism(self):
         # Перестановка входов — более сильная проверка, чем просто повторный запуск.
         nodes = self.nodes.sample(frac=1, random_state=17)
