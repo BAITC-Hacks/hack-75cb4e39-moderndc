@@ -5,3 +5,6 @@ networkx==3.7
 numpy==2.3.5
 # NetworkX PageRank использует scipy.
 scipy==1.18.1
+# Локальный presentation layer этапа 2.
+streamlit==1.64.0
+plotly==7.1.0

@@ -181,3 +181,75 @@ distributor 111, transit 13. Эти количества — результат,
 networkx 3.7, pyarrow 25.0.1, scipy 1.18.1; версии закреплены в requirements.txt.
 Детерминизм гарантируется для одинаковых входов, параметров и окружения;
 между версиями Louvain/численных библиотек результат может различаться.
+
+## Этап 2 — локальный presentation / inspection UI
+
+Streamlit 1.64.0 и Plotly 7.1.0 показывают готовый результат этапа 1.
+`app.py` — интерфейс и локальная визуализация; `agent.py` — чтение, проверка
+минимальной схемы и пять детерминированных действий; `test_agent.py` — проверки
+источников данных и UI smoke tests. Формулы, роли и кластеры не пересчитываются.
+
+Установка и запуск из корня репозитория:
+
+```powershell
+python -m pip install -r requirements.txt
+python starter.py --data data --out out
+python -m streamlit run app.py --server.address 127.0.0.1
+```
+
+Открыть локальный адрес, напечатанный Streamlit (обычно http://127.0.0.1:8501).
+Пути данных определяются относительно `app.py`. Чтение кэшируется через
+`st.cache_data`; изменение размера/mtime файла обновляет кэш. Отсутствующие
+outputs показывают команду запуска analytics, malformed data — понятную ошибку.
+UI не запускает analytics автоматически. Это локальное приложение без deployment.
+
+- **Dashboard:** фактические counts, распределение ролей, готовый shortlist и
+  гипотезы кластеров. Transactions = сумма n_tx из edges.parquet; отдельные
+  transactions.parquet UI не загружает. Gid из shortlist можно скопировать в Inspector.
+- **Node Inspector:** выбор из всех nodes_roles.csv или точный gid, сохранённые
+  scores/evidence, доступные диагностические колонки, ограничения и cluster hypothesis.
+  Основное объяснение — строка explanation из explain_node(gid); evidence входит
+  в неё без изменения и отдельно повторно не выводится. Warnings показаны отдельно.
+  Gid передаётся браузеру строкой; float и scientific notation не принимаются.
+  Неопределённый pass_through показан как undefined, а не как реальный нулевой ratio.
+- **Neighbors / local graph:** только выбранный gid и непосредственные соседи
+  из edges.parquet. Каждая линия — фактическое incident directed edge со стрелкой
+  и tooltip суммы/числа переводов; встречные направления разделены кривыми.
+  Navy marker выделяет выбранный узел, green — incoming, amber — outgoing.
+  Геометрическое размещение не имеет аналитического смысла. Полный граф по
+  умолчанию не строится, скрытые downstream edges не добавляются. Isolates имеют empty state.
+- **Cluster Inspector:** сохранённые counts, internal KZT, top_gids и hypothesis;
+  members берутся только по cluster_id, сортируются по priority descending / gid ascending.
+- **Agentic Analyst:** явный выбор inspect_node(gid), inspect_cluster(cluster_id),
+  get_top_priority(n), get_neighbors(gid), explain_node(gid). Каждое действие
+  проверяет параметр и наличие записи/допустимый диапазон, возвращает сохранённые
+  данные. Dispatcher возвращает structured result и audit trace фактических операций.
+  explain_node(gid) детерминированно формирует краткое presentation explanation
+  из сохранённых gid, role, role_score, evidence и priority_score, с форматированием
+  обоих scores до 4 знаков и пояснением смысла review priority. Seed/truncation
+  limitations возвращаются отдельно, в порядке seed, затем truncation.
+  Это не chatbot/LLM; natural-language intent recognition отсутствует.
+  Для n разрешён только диапазон готового shortlist: новые места рейтинга не создаются.
+
+Priority — приоритет проверки, не вероятность/доказательство нарушения.
+Seed-вход может быть неполон; при depth=4 downstream censored и неизвестен,
+отсутствие выхода не доказывает остановку денег или фактический non-terminal status.
+Explain показывает оба предупреждения, если оба флага true. Временные признаки
+имеют дневную точность; совпадение активности не доказывает источник финансирования.
+Роли и гипотезы характеризуют только наблюдаемую структуру.
+
+Проверки этапов по порядку:
+
+```powershell
+python starter.py --data data --out out
+python -m unittest -v test_analytics
+python -m unittest -v test_agent.AgentTests
+python -m unittest -v test_agent.UISmokeTests
+```
+
+Smoke использует штатный [Streamlit AppTest](https://docs.streamlit.io/develop/api-reference/app-testing/st.testing.v1.apptest):
+dashboard, выбор узла/кластера, agent action, seed/truncation warnings,
+isolates, invalid inputs, missing/malformed state. Геометрия локального графа,
+направленные стрелки и данные tooltips проверяются непосредственно в Plotly figure;
+пиксельное browser testing не заявляется. Стрелки используют
+[Plotly annotations](https://plotly.com/python/reference/layout/annotations/).
