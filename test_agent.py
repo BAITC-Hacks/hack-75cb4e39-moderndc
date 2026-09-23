@@ -1,6 +1,7 @@
 """Read-only retrieval contracts and Streamlit smoke checks; no scoring tests."""
 
 import json
+from decimal import Decimal
 from pathlib import Path
 import unittest
 from unittest.mock import patch
@@ -149,7 +150,22 @@ class UISmokeTests(unittest.TestCase):
         return AppTest.from_file(str(ROOT / "app.py"), default_timeout=30).run()
 
     def assert_table(self, container, frame):
-        expected = frame.to_html(index=False, escape=True, border=0, classes="inspection-table")
+        # Independent display expectations; still compare every cell and row in order.
+        shown = frame.copy(deep=True)
+        labels = {"rank": "Rank", "gid": "GID", "role": "Role", "role_score": "Role score",
+                  "priority_score": "Review priority", "why": "Key signals", "evidence": "Evidence",
+                  "cluster_id": "Cluster ID", "n_nodes": "Members", "n_seed": "Seed nodes",
+                  "sum_kzt_internal": "Internal flow", "top_gids": "Top GIDs",
+                  "hypothesis": "Structural hypothesis", "direction": "Direction",
+                  "neighbor_gid": "Neighbor GID", "sum_kzt": "Amount", "n_tx": "Transactions"}
+        for key in shown:
+            if key in ("sum_kzt", "sum_kzt_internal"):
+                shown[key] = shown[key].map(lambda v: "₸" + format(Decimal(str(v)).normalize(), ",f"))
+            elif key in ("role_score", "priority_score"):
+                shown[key] = shown[key].map(lambda v: f"{Decimal(str(v)):.4f}")
+            elif key == "direction":
+                shown[key] = shown[key].map({"incoming": "Incoming", "outgoing": "Outgoing"})
+        expected = shown.rename(columns=labels).to_html(index=False, escape=True, border=0, classes="inspection-table")
         self.assertIn(expected, [item.proto.body for item in container.get("html")])
 
     def collapsed(self, at, label):
@@ -218,7 +234,14 @@ class UISmokeTests(unittest.TestCase):
         at.radio(key="page").set_value("Cluster Inspector").run()
         at.selectbox(key="cluster_id").set_value(cid).run()
         self.assertFalse(at.exception)
-        self.assertEqual({m.label: m.value for m in at.metric}, expected)
+        displayed = dict(expected)
+        displayed["Dominant share"] = f"{Decimal(stored['dominant_share']) * 100:.2f}%"
+        amount = Decimal(str(detail["cluster"]["sum_kzt_internal"]))
+        for scale, suffix in ((10**9, "B"), (10**6, "M"), (10**3, "K"), (1, "")):
+            if amount >= scale:
+                displayed["Internal KZT"] = "₸" + f"{amount / scale:.2f}".rstrip("0").rstrip(".") + suffix
+                break
+        self.assertEqual({m.label: m.value for m in at.metric}, displayed)
         full = self.collapsed(at, "Full stored structural hypothesis")
         self.assertIn(hypothesis, [item.value for item in full.markdown])
         members = pd.DataFrame(detail["members"])[["gid", "role", "priority_score", "evidence"]]
@@ -288,6 +311,23 @@ class UISmokeTests(unittest.TestCase):
         self.assertIn(normal.role, explanation)
         self.assertEqual(sum(text.count(normal.evidence) for text in displayed), 1)
         self.assertNotIn(normal.evidence, displayed)
+        self.assertIn("Technical evidence", [v.value for v in at.caption])
+        summary_text = "\n".join(displayed)
+        self.assertIn(f"Incoming relationships: {normal.in_deg}", summary_text)
+        self.assertIn(f"Outgoing transactions: {normal.out_tx}", summary_text)
+        self.assertIn(f"Betweenness percentile: {Decimal(str(normal.betweenness_pct)) * 100:.2f}%", summary_text)
+        from app import display_frame, format_kzt, format_percent, format_score
+        original = self.data["top"].copy(deep=True)
+        display_frame(self.data["top"])
+        pd.testing.assert_frame_equal(self.data["top"], original)
+        self.assertEqual(format_kzt("18838290.01"), "₸18,838,290.01")
+        self.assertEqual(format_kzt("3848440", compact=True), "₸3.85M")
+        self.assertEqual(format_kzt("0.001"), "₸0.001")
+        self.assertEqual(format_percent("0.5724637681"), "57.25%")
+        self.assertEqual(format_score("0.975123"), "0.9751")
+        for missing in (None, float("nan"), float("inf")):
+            for formatter in (format_kzt, format_percent, format_score):
+                self.assertEqual(formatter(missing), "Unavailable")
         self.assertEqual(len(at.get("plotly_chart")), 1)
         for mask, warning in ((self.nodes.is_seed, SEED_WARNING), (self.nodes.truncated_by_depth, TRUNCATION_WARNING)):
             gid = self.nodes[mask].iloc[0].gid
@@ -332,16 +372,17 @@ class UISmokeTests(unittest.TestCase):
         self.assertEqual(len(fig.layout.annotations), len(expected))
         self.assertEqual(set(fig.layout.meta["node_gids"]), set(expected.src) | set(expected.dst) | {gid})
         for trace, arrow, edge in zip(fig.data[:-1], fig.layout.annotations, actual):
-            self.assertIn(f"{edge['src']} → {edge['dst']}", trace.text[0])
-            self.assertIn("sum_kzt=", trace.text[0])
-            self.assertIn("n_tx=", trace.text[0])
+            self.assertEqual(trace.text[0],
+                             f"Source GID: {edge['src']}<br>Destination GID: {edge['dst']}"
+                             f"<br>Amount: ₸{format(Decimal(str(edge['sum_kzt'])).normalize(), ',f')}"
+                             f"<br>Transactions: {edge['n_tx']}")
             self.assertTrue(arrow.showarrow)
             self.assertEqual((arrow.ax, arrow.ay), (trace.x[-6], trace.y[-6]))
             self.assertEqual((arrow.x, arrow.y), (trace.x[-3], trace.y[-3]))
-        for tooltip in fig.data[-1].text:
-            self.assertIn("gid=", tooltip)
-            self.assertIn("role=", tooltip)
-            self.assertIn("priority_score=", tooltip)
+        for node_gid, tooltip in zip(fig.layout.meta["node_gids"], fig.data[-1].text):
+            node = self.nodes.loc[self.nodes.gid == node_gid].iloc[0]
+            self.assertEqual(tooltip, f"GID: {node_gid}<br>Role: {node.role}"
+                             f"<br>Review priority: {Decimal(str(node.priority_score)):.4f}")
         isolated = self.nodes[(self.nodes.in_deg + self.nodes.out_deg) == 0].iloc[0].gid
         self.assertIsNone(local_graph(self.data, isolated))
         small = self.nodes[(self.nodes.in_deg + self.nodes.out_deg).between(1, 30)].iloc[0].gid
