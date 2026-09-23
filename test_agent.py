@@ -159,13 +159,93 @@ class UISmokeTests(unittest.TestCase):
                   "hypothesis": "Structural hypothesis", "direction": "Direction",
                   "neighbor_gid": "Neighbor GID", "sum_kzt": "Amount", "n_tx": "Transactions"}
         for key in shown:
-            if key in ("sum_kzt", "sum_kzt_internal"):
+            if key == "top_gids":
+                shown[key] = shown[key].map(lambda value: "\n".join(str(gid) for gid in json.loads(value)))
+            elif key in ("why", "hypothesis"):
+                def description(raw):
+                    parts = []
+                    names = {"bet_pct": "Betweenness percentile", "pr_pct": "PageRank percentile",
+                             "volume_pct": "Volume percentile", "tx_pct": "Transaction count percentile",
+                             "prev_day": "Prior-day activity signal", "dominant_share": "Dominant share",
+                             "category": "Orientation", "dominant_role": "Dominant role",
+                             "truncated": "Truncated nodes"}
+                    for token in raw.split("; "):
+                        field, _, value = token.partition("=")
+                        if token.startswith("roles: "):
+                            text = "Role counts: " + token[7:].replace("=", ": ")
+                        elif field in ("bet_pct", "pr_pct", "volume_pct", "tx_pct", "prev_day", "dominant_share"):
+                            text = f"{names[field]}: {Decimal(value) * 100:.2f}%"
+                        elif field == "temporal":
+                            text = f"Temporal priority component: {Decimal(value):.4f}"
+                        elif field == "internal":
+                            text = "Internal flow: ₸" + format(Decimal(value.removesuffix(" KZT")).normalize(), ",f")
+                        elif field in names:
+                            text = f"{names[field]}: {value}"
+                        else:
+                            text = "Structural hypothesis only" if token == "structural hypothesis only" else token
+                        parts.append(text)
+                    return " · ".join(parts)
+                shown[key] = shown[key].map(description)
+            elif key in ("sum_kzt", "sum_kzt_internal"):
                 shown[key] = shown[key].map(lambda v: "₸" + format(Decimal(str(v)).normalize(), ",f"))
             elif key in ("role_score", "priority_score"):
                 shown[key] = shown[key].map(lambda v: f"{Decimal(str(v)):.4f}")
             elif key == "direction":
                 shown[key] = shown[key].map({"incoming": "Incoming", "outgoing": "Outgoing"})
-        expected = shown.rename(columns=labels).to_html(index=False, escape=True, border=0, classes="inspection-table")
+        if "evidence" in shown:
+            # Independent expectations from the stored serialization, not app's formatter.
+            from html import unescape
+            import re
+
+            def evidence_text(raw):
+                signals = []
+                for token in raw.split(";"):
+                    key, value = token.strip().split("=", 1)
+                    text = token.strip()
+                    if key in ("in_deg", "out_deg", "depth"):
+                        text = {"in_deg": f"{value} incoming", "out_deg": f"{value} outgoing",
+                                "depth": f"Depth {value}"}[key]
+                    elif key in ("in", "out"):
+                        amount = Decimal(value.removesuffix(" KZT"))
+                        money = format(amount.normalize(), ",f")
+                        for scale, suffix in ((10**9, "B"), (10**6, "M"), (10**3, "K")):
+                            if amount >= scale:
+                                money = f"{amount / scale:.2f}".rstrip("0").rstrip(".") + suffix
+                                break
+                        text = f"₸{money} {key}"
+                    elif key == "tx":
+                        incoming, outgoing = value.split("/")
+                        text = f"{incoming} incoming tx · {outgoing} outgoing tx"
+                    elif key in ("bet_pct", "pr_pct", "prev_day"):
+                        label = {"bet_pct": "Betweenness", "pr_pct": "PageRank",
+                                 "prev_day": "Prior-day activity signal"}[key]
+                        text = f"{label} {Decimal(value) * 100:.2f}%"
+                    elif key in ("truncated", "is_seed"):
+                        text = {"truncated": {"0": "Not truncated", "1": "Truncated"},
+                                "is_seed": {"0": "Non-seed", "1": "Seed"}}[key][value]
+                    elif key == "role_score":
+                        text = f"Role score {Decimal(value):.4f}"
+                    elif key == "observed_edges" and value == "0":
+                        text = "0 observed edges"
+                    elif key == "out/in" and value == "unavailable":
+                        text = "Out/in ratio unavailable"
+                    signals.append(text)
+                return " · ".join(signals)
+
+            def visible_rows(html):
+                # AppTest exposes these escaped tables as HTML; compare visible cells,
+                # ignoring styling, nesting attributes and whitespace, not row order.
+                return [[" ".join(unescape(cell).split()) for cell in
+                         re.findall(r"<t[hd]\b[^>]*>(.*?)</t[hd]>", row, re.S)]
+                        for row in re.findall(r"<tr\b[^>]*>(.*?)</tr>", html, re.S)]
+
+            shown["evidence"] = shown.evidence.map(evidence_text)
+            expected = shown.rename(columns=labels).to_html(index=False, escape=True)
+            self.assertIn(visible_rows(expected),
+                          [visible_rows(item.proto.body) for item in container.get("html")])
+            return
+        expected = shown.rename(columns=labels).to_html(index=False, escape=True, border=0, classes="inspection-table",
+                                                       formatters={"Top GIDs": lambda value: value})
         self.assertIn(expected, [item.proto.body for item in container.get("html")])
 
     def collapsed(self, at, label):

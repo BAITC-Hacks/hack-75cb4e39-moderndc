@@ -4,6 +4,7 @@ from pathlib import Path
 from html import escape
 from decimal import Decimal, InvalidOperation
 import math
+import json
 import re
 
 import pandas as pd
@@ -109,6 +110,7 @@ html {color-scheme:dark;}
 .inspection-table th {background:var(--mg-elevated);color:var(--mg-text);font-size:.78rem;
     font-weight:600;letter-spacing:.025em;}
 .inspection-table td:first-of-type {font-family:Consolas,'Courier New',monospace;color:var(--mg-text);}
+.inspection-table td {white-space:pre-line;}
 .inspection-table tbody tr:hover {background:var(--mg-elevated);}
 .inspection-table tbody tr:last-of-type td {border-bottom:0;}
 @media(max-width:900px) {
@@ -252,11 +254,114 @@ def format_score(value):
     return "Unavailable" if number is None else f"{number:.4f}"
 
 
+def format_evidence_for_display(evidence):
+    """Humanize analytics.evidence tokens only; retain unrecognized text literally."""
+    if not isinstance(evidence, str):
+        return "" if evidence is None or pd.api.types.is_scalar(evidence) and pd.isna(evidence) else str(evidence)
+    parts = evidence.split(";")
+    rendered = []
+    changed = False
+    for part in parts:
+        key, separator, value = part.strip().partition("=")
+        text = part
+        if separator:
+            if key in ("in_deg", "out_deg", "depth") and re.fullmatch(r"[0-9]+", value):
+                text = {"in_deg": f"{value} incoming", "out_deg": f"{value} outgoing",
+                        "depth": f"Depth {value}"}[key]
+            elif key == "tx" and re.fullmatch(r"[0-9]+/[0-9]+", value):
+                incoming, outgoing = value.split("/")
+                text = f"{incoming} incoming tx · {outgoing} outgoing tx"
+            elif key in ("truncated", "is_seed") and value in ("0", "1"):
+                text = {"truncated": ("Not truncated", "Truncated"),
+                        "is_seed": ("Non-seed", "Seed")}[key][int(value)]
+            else:
+                numeric = value.removesuffix(" KZT") if key in ("in", "out") else value
+                # Bound input length/exponent before passing to Decimal formatting.
+                if re.fullmatch(r"[0-9]{1,24}(?:\.[0-9]{1,24})?(?:e[+-]?[0-9]{1,2})?", numeric):
+                    number = display_number(numeric)
+                    if key in ("in", "out"):
+                        text = f"{format_kzt(number, compact=True)} {key}"
+                    elif key in ("bet_pct", "pr_pct", "prev_day") and 0 <= number <= 1:
+                        label = {"bet_pct": "Betweenness", "pr_pct": "PageRank",
+                                 "prev_day": "Prior-day activity signal"}[key]
+                        text = f"{label} {format_percent(number)}"
+                    elif key == "role_score" and 0 <= number <= 1:
+                        text = f"Role score {format_score(number)}"
+                if key == "out/in" and value == "unavailable":
+                    text = "Out/in ratio unavailable"
+                elif key == "observed_edges" and value == "0":
+                    text = "0 observed edges"
+        changed |= text != part
+        rendered.append(text)
+    return " · ".join(rendered) if changed else evidence
+
+
+def format_table_description(value, kind):
+    """Readable labels for stored shortlist/cluster text; unknown parts stay intact."""
+    if not isinstance(value, str):
+        return "" if value is None or pd.isna(value) else str(value)
+    labels = {"bet_pct": "Betweenness percentile", "pr_pct": "PageRank percentile",
+              "volume_pct": "Volume percentile", "tx_pct": "Transaction count percentile",
+              "prev_day": "Prior-day activity signal", "temporal": "Temporal priority component",
+              "category": "Orientation", "dominant_role": "Dominant role",
+              "dominant_share": "Dominant share", "internal": "Internal flow",
+              "truncated": "Truncated nodes"}
+    parts = []
+    for token in value.split(";"):
+        token = token.strip()
+        key, separator, raw = token.partition("=")
+        text = token
+        if kind == "hypothesis" and token.startswith("roles: "):
+            counts = token.removeprefix("roles: ").split(", ")
+            if all(re.fullmatch(r"[a-z]+=[0-9]+", count) for count in counts):
+                text = "Role counts: " + ", ".join(count.replace("=", ": ") for count in counts)
+        elif token == "structural hypothesis only":
+            text = "Structural hypothesis only"
+        elif separator and key in labels:
+            if key in ("category", "dominant_role") and re.fullmatch(r"[a-z/-]+", raw):
+                text = f"{labels[key]}: {raw}"
+            else:
+                number = display_number(raw.removesuffix(" KZT"))
+                if number is not None:
+                    if key in ("bet_pct", "pr_pct", "volume_pct", "tx_pct", "prev_day", "dominant_share") and 0 <= number <= 1:
+                        text = f"{labels[key]}: {format_percent(number)}"
+                    elif key == "temporal" and 0 <= number <= 1:
+                        text = f"{labels[key]}: {format_score(number)}"
+                    elif key == "internal" and number >= 0:
+                        text = f"{labels[key]}: {format_kzt(number)}"
+                    elif key == "truncated" and re.fullmatch(r"[0-9]+", raw):
+                        text = f"{labels[key]}: {raw}"
+        parts.append(text)
+    return " · ".join(parts)
+
+
+def format_top_gids(value):
+    """One exact identifier per line, preserving the stored leader order."""
+    if not isinstance(value, str):
+        return "" if value is None or pd.isna(value) else str(value)
+    try:
+        gids = json.loads(value)
+    except (ValueError, TypeError):
+        return value
+    if not isinstance(gids, list) or not all(
+        type(gid) is int and gid >= 0 or isinstance(gid, str) and re.fullmatch(r"[0-9]+", gid)
+        for gid in gids
+    ):
+        return value
+    return "\n".join(str(gid) for gid in gids)
+
+
 def display_frame(frame):
     """Preserve row order and original data; only the rendered copy is formatted."""
     shown = frame.copy(deep=True)
     for key in shown.columns:
-        if key in ("sum_kzt", "sum_kzt_internal", "in_kzt", "out_kzt"):
+        if key == "top_gids":
+            shown[key] = shown[key].map(format_top_gids)
+        elif key == "evidence":
+            shown[key] = shown[key].map(format_evidence_for_display)
+        elif key in ("why", "hypothesis"):
+            shown[key] = shown[key].map(lambda value: format_table_description(value, key))
+        elif key in ("sum_kzt", "sum_kzt_internal", "in_kzt", "out_kzt"):
             shown[key] = shown[key].map(format_kzt)
         elif key in ("role_score", "priority_score"):
             shown[key] = shown[key].map(format_score)
@@ -296,7 +401,8 @@ def node_summary(node):
 def table(frame, technical=False):
     # Wrapped, escaped HTML avoids horizontal scrolling for evidence and hypotheses.
     shown = frame if technical else display_frame(frame)
-    st.html(shown.to_html(index=False, escape=True, border=0, classes="inspection-table"))
+    st.html(shown.to_html(index=False, escape=True, border=0, classes="inspection-table",
+                         formatters={"Top GIDs": lambda value: value}))
 
 
 def detail_table(frame, noun):
