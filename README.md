@@ -206,6 +206,9 @@ UI не запускает analytics автоматически. Это лока
 - **Dashboard:** фактические counts, распределение ролей, готовый shortlist и
   гипотезы кластеров. Transactions = сумма n_tx из edges.parquet; отдельные
   transactions.parquet UI не загружает. Gid из shortlist можно скопировать в Inspector.
+  По умолчанию показаны первые 10 priority nodes в сохранённом порядке и 10
+  кластеров по n_nodes DESC, cluster_id ASC (только UI-сортировка). Полные таблицы
+  доступны в закрытых expanders «Show all priority nodes» и «Show all clusters».
 - **Node Inspector:** выбор из всех nodes_roles.csv или точный gid, сохранённые
   scores/evidence, доступные диагностические колонки, ограничения и cluster hypothesis.
   Основное объяснение — строка explanation из explain_node(gid); evidence входит
@@ -218,8 +221,18 @@ UI не запускает analytics автоматически. Это лока
   Navy marker выделяет выбранный узел, green — incoming, amber — outgoing.
   Геометрическое размещение не имеет аналитического смысла. Полный граф по
   умолчанию не строится, скрытые downstream edges не добавляются. Isolates имеют empty state.
+  Перед графом показаны counts входящих, исходящих и всех возвращённых наблюдаемых
+  связей. GRAPH_EDGE_LIMIT=30: при превышении граф показывает первые 30 рёбер
+  по sum_kzt DESC, n_tx DESC, numeric src ASC, numeric dst ASC, с явным указанием
+  показанного и полного количества. Таблица показывает первые 15 связей в порядке
+  get_neighbors; все связи доступны в закрытом «Show all N observed relationships».
 - **Cluster Inspector:** сохранённые counts, internal KZT, top_gids и hypothesis;
   members берутся только по cluster_id, сортируются по priority descending / gid ascending.
+  Компактная сводка извлекает только однозначные сохранённые поля category,
+  dominant_role, dominant_share, internal KZT, truncated из hypothesis; отсутствующие
+  или неоднозначные значения не угадываются. Точная исходная строка всегда доступна
+  в закрытом «Full stored structural hypothesis». По умолчанию показаны первые
+  15 members в существующем порядке; остальные доступны в «Show all M members».
 - **Agentic Analyst:** явный выбор inspect_node(gid), inspect_cluster(cluster_id),
   get_top_priority(n), get_neighbors(gid), explain_node(gid). Каждое действие
   проверяет параметр и наличие записи/допустимый диапазон, возвращает сохранённые
@@ -230,6 +243,12 @@ UI не запускает analytics автоматически. Это лока
   limitations возвращаются отдельно, в порядке seed, затем truncation.
   Это не chatbot/LLM; natural-language intent recognition отсутствует.
   Для n разрешён только диапазон готового shortlist: новые места рейтинга не создаются.
+  Сначала показывается читаемый результат выбранного действия (объяснение, компактные
+  поля или таблица); warnings остаются отдельно. Полный неизменённый structured result
+  доступен в закрытом «Raw structured result», audit trace остаётся видимым после результата.
+
+Все ограничения числа строк/рёбер относятся только к presentation: аналитика,
+исходные данные и результаты действий не меняются; полные данные не удаляются.
 
 Priority — приоритет проверки, не вероятность/доказательство нарушения.
 Seed-вход может быть неполон; при depth=4 downstream censored и неизвестен,

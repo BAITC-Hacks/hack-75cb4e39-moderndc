@@ -2,6 +2,7 @@
 
 from pathlib import Path
 import math
+import re
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -10,6 +11,7 @@ import streamlit as st
 from agent import (Analyst, DIAGNOSTICS, FILES, PRIORITY_NOTE, load_data, role_counts, summary)
 
 ROOT = Path(__file__).resolve().parent
+GRAPH_EDGE_LIMIT = 30
 
 
 @st.cache_data(show_spinner=False)
@@ -34,6 +36,9 @@ def local_graph(data, gid):
     if incident.empty:
         return None
     incident = incident.assign(_src=incident.src.map(int), _dst=incident.dst.map(int)).sort_values(["_src", "_dst"])
+    if len(incident) > GRAPH_EDGE_LIMIT:
+        incident = incident.sort_values(["sum_kzt", "n_tx", "_src", "_dst"],
+                                        ascending=[False, False, True, True]).head(GRAPH_EDGE_LIMIT)
     neighbors = sorted((set(incident.src) | set(incident.dst)) - {gid}, key=int)
     positions = {gid: (0.0, 0.0)}
     positions.update({node: (math.cos(2 * math.pi * i / len(neighbors)),
@@ -87,6 +92,48 @@ def table(frame):
     st.html(frame.to_html(index=False, escape=True, border=0, classes="inspection-table"))
 
 
+def detail_table(frame, noun):
+    """Preserve retrieval order; keep the complete table available on demand."""
+    st.caption(f"Showing {min(15, len(frame))} of {len(frame)} {noun}.")
+    table(frame.head(15))
+    if len(frame) > 15:
+        with st.expander(f"Show all {len(frame)} {noun}", expanded=False):
+            table(frame)
+
+
+def parse_hypothesis(hypothesis):
+    """Extract unique, exact stored fields only; malformed/ambiguous fields are omitted."""
+    if not isinstance(hypothesis, str):
+        return {}
+    fields = {}
+    for part in hypothesis.split(";"):
+        key, separator, value = part.strip().partition("=")
+        if separator:
+            fields.setdefault(key, []).append(value)
+    formats = {
+        "category": ("Structural category", r"[a-z]+(?:[-/][a-z]+)*"),
+        "dominant_role": ("Dominant role", r"consolidator|transit|distributor|terminal|coordinator|peripheral"),
+        "dominant_share": ("Dominant share", r"(?:0(?:\.[0-9]+)?|1(?:\.0+)?)"),
+        "internal": ("Internal KZT", r"[0-9]+(?:\.[0-9]+)? KZT"),
+        "truncated": ("Truncated nodes", r"[0-9]+"),
+    }
+    result = {}
+    for key, (label, pattern) in formats.items():
+        values = fields.get(key, [])
+        if len(values) == 1 and re.fullmatch(pattern, values[0]):
+            result[label] = values[0]
+    return result
+
+
+def structural_summary(hypothesis):
+    fields = list(parse_hypothesis(hypothesis).items())
+    for start in range(0, len(fields), 3):
+        for col, (label, value) in zip(st.columns(3), fields[start:start+3]):
+            col.metric(label, value)
+    with st.expander("Full stored structural hypothesis", expanded=False):
+        st.write(hypothesis)
+
+
 def show_node(data):
     st.header("Node Inspector")
     options = sorted(data["nodes"].gid.tolist(), key=int)
@@ -121,13 +168,21 @@ def show_node(data):
         table(pd.DataFrame([{"field": key, "value": str(value)} for key, value in diagnostics.items()]))
     st.subheader("Observed local network")
     neighbors = agent.get_neighbors(gid)
+    for col, label, value in zip(st.columns(3),
+                                ["Incoming relationships", "Outgoing relationships", "Observed incident edges"],
+                                [sum(r["direction"] == "incoming" for r in neighbors),
+                                 sum(r["direction"] == "outgoing" for r in neighbors), len(neighbors)]):
+        col.metric(label, value)
     if not neighbors:
         st.info("No observed incoming or outgoing edges.")
     else:
         st.caption("Selected node: large navy marker. Green: incoming. Amber: outgoing. "
                    "Arrowheads show direction; hover for exact gids and edge amounts. Layout has no analytical meaning.")
+        if len(neighbors) > GRAPH_EDGE_LIMIT:
+            st.caption(f"Showing {GRAPH_EDGE_LIMIT} of {len(neighbors)} observed incident edges in the graph. "
+                       f"All {len(neighbors)} observed relationships remain available below.")
         st.plotly_chart(local_graph(data, gid), width="stretch", key="local_graph")
-        table(pd.DataFrame(neighbors))
+        detail_table(pd.DataFrame(neighbors), "observed relationships")
     st.subheader(f"Cluster {node['cluster_id']}")
     cluster = agent.inspect_cluster(node["cluster_id"])["cluster"]
     st.write(cluster["hypothesis"])
@@ -150,11 +205,11 @@ def show_cluster(data):
     detail = result["data"]
     cluster = detail["cluster"]
     st.subheader(f"Cluster {cluster['cluster_id']}")
-    st.write(cluster["hypothesis"])
+    structural_summary(cluster["hypothesis"])
     table(pd.DataFrame([cluster])[["n_nodes", "n_seed", "sum_kzt_internal", "top_gids"]])
     st.plotly_chart(role_chart(detail["role_distribution"]), width="stretch")
     st.caption("Members: stored priority descending, exact gid ascending.")
-    table(pd.DataFrame(detail["members"])[["gid", "role", "priority_score", "evidence"]])
+    detail_table(pd.DataFrame(detail["members"])[["gid", "role", "priority_score", "evidence"]], "members")
 
 
 def show_agent(data):
@@ -168,7 +223,25 @@ def show_agent(data):
         response = Analyst(data).dispatch(action, parameter)
         if response["ok"]:
             st.success("Action completed")
-            st.json(response["data"])
+            result = response["data"]
+            if action == "explain_node":
+                st.write(result["explanation"])
+                for warning in result["limitations"]:
+                    st.warning(warning)
+            elif action == "inspect_node":
+                table(pd.DataFrame([result])[["gid", "role", "role_score", "priority_score", "evidence"]])
+            elif action == "inspect_cluster":
+                cluster = result["cluster"]
+                table(pd.DataFrame([cluster])[["cluster_id", "n_nodes", "n_seed", "sum_kzt_internal"]])
+                structural_summary(cluster["hypothesis"])
+            elif action == "get_top_priority":
+                table(pd.DataFrame(result))
+            elif result:
+                detail_table(pd.DataFrame(result), "observed relationships")
+            else:
+                st.info("No observed incoming or outgoing edges.")
+            with st.expander("Raw structured result", expanded=False):
+                st.json(result)
         else:
             st.error(response["error"])
         st.subheader("Audit trace")
@@ -208,9 +281,18 @@ def main():
         st.plotly_chart(role_chart(role_counts(data["nodes"])), width="stretch")
         st.subheader("Top priority")
         st.caption("Stored shortlist. Copy a gid into Node Inspector to follow its observed connections.")
-        table(data["top"][["rank", "gid", "role", "priority_score", "why"]])
+        top = data["top"]
+        st.caption(f"Showing top {min(10, len(top))} of {len(top)} priority nodes.")
+        table(top.head(10)[["rank", "gid", "role", "priority_score", "why"]])
+        with st.expander("Show all priority nodes", expanded=False):
+            table(top)
         st.subheader("Clusters")
-        table(data["clusters"][["cluster_id", "n_nodes", "n_seed", "sum_kzt_internal", "hypothesis"]])
+        clusters = data["clusters"]
+        preview = clusters.sort_values(["n_nodes", "cluster_id"], ascending=[False, True]).head(10)
+        st.caption(f"Showing {len(preview)} of {len(clusters)} clusters.")
+        table(preview[["cluster_id", "n_nodes", "n_seed", "sum_kzt_internal", "hypothesis"]])
+        with st.expander("Show all clusters", expanded=False):
+            table(clusters)
     elif page == "Node Inspector":
         show_node(data)
     elif page == "Cluster Inspector":

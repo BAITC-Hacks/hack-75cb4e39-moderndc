@@ -148,6 +148,128 @@ class UISmokeTests(unittest.TestCase):
         from streamlit.testing.v1 import AppTest
         return AppTest.from_file(str(ROOT / "app.py"), default_timeout=30).run()
 
+    def assert_table(self, container, frame):
+        expected = frame.to_html(index=False, escape=True, border=0, classes="inspection-table")
+        self.assertIn(expected, [item.proto.body for item in container.get("html")])
+
+    def collapsed(self, at, label):
+        block = next(item for item in at.expander if item.label == label)
+        self.assertFalse(block.proto.expanded)
+        return block
+
+    def test_dashboard_previews(self):
+        at = self.app()
+        self.assertFalse(at.exception)
+        top, clusters = self.data["top"], self.data["clusters"]
+        self.assert_table(at, top.head(10))
+        self.assert_table(self.collapsed(at, "Show all priority nodes"), top)
+        expected = clusters.sort_values(["n_nodes", "cluster_id"], ascending=[False, True]).head(10)
+        self.assert_table(at, expected[["cluster_id", "n_nodes", "n_seed", "sum_kzt_internal", "hypothesis"]])
+        self.assert_table(self.collapsed(at, "Show all clusters"), clusters)
+        self.assertIn(f"Showing top {min(10, len(top))} of {len(top)} priority nodes.", [v.value for v in at.caption])
+        self.assertIn(f"Showing {len(expected)} of {len(clusters)} clusters.", [v.value for v in at.caption])
+
+    def test_node_relationship_disclosure(self):
+        agent = Analyst(self.data)
+        gid = self.data["top"].iloc[0].gid
+        relationships = agent.get_neighbors(gid)
+        self.assertGreater(len(relationships), 30)
+        at = self.app()
+        at.radio(key="page").set_value("Node Inspector").run()
+        at.selectbox(key="node_gid").set_value(gid).run()
+        self.assertFalse(at.exception)
+        metrics = {m.label: m.value for m in at.metric}
+        self.assertEqual(metrics["Incoming relationships"], str(sum(r["direction"] == "incoming" for r in relationships)))
+        self.assertEqual(metrics["Outgoing relationships"], str(sum(r["direction"] == "outgoing" for r in relationships)))
+        self.assertEqual(metrics["Observed incident edges"], str(len(relationships)))
+        self.assertIn(f"Showing 30 of {len(relationships)} observed incident edges in the graph. "
+                      f"All {len(relationships)} observed relationships remain available below.", [v.value for v in at.caption])
+        frame = pd.DataFrame(relationships)
+        self.assert_table(at, frame.head(15))
+        self.assert_table(self.collapsed(at, f"Show all {len(frame)} observed relationships"), frame)
+        self.assertEqual(agent.get_neighbors(gid), relationships)
+        small = self.nodes[(self.nodes.in_deg + self.nodes.out_deg).between(1, 15)].iloc[0].gid
+        at.selectbox(key="node_gid").set_value(small).run()
+        self.assertFalse(at.exception)
+        self.assertFalse(any("observed incident edges in the graph" in v.value for v in at.caption))
+        self.assert_table(at, pd.DataFrame(agent.get_neighbors(small)))
+        self.assertFalse(any("observed relationships" in v.label for v in at.expander))
+        isolated = self.nodes[(self.nodes.in_deg + self.nodes.out_deg) == 0].iloc[0].gid
+        at.selectbox(key="node_gid").set_value(isolated).run()
+        metrics = {m.label: m.value for m in at.metric}
+        for label in ("Incoming relationships", "Outgoing relationships", "Observed incident edges"):
+            self.assertEqual(metrics[label], "0")
+
+    def test_cluster_summary_and_disclosure(self):
+        from app import parse_hypothesis
+        cid = int(self.data["clusters"].sort_values("n_nodes", ascending=False).iloc[0].cluster_id)
+        detail = Analyst(self.data).inspect_cluster(cid)
+        hypothesis = detail["cluster"]["hypothesis"]
+        stored = dict(part.split("=", 1) for part in hypothesis.split("; ") if "=" in part)
+        expected = {"Structural category": stored["category"], "Dominant role": stored["dominant_role"],
+                    "Dominant share": stored["dominant_share"], "Internal KZT": stored["internal"],
+                    "Truncated nodes": stored["truncated"]}
+        self.assertEqual(parse_hypothesis(hypothesis), expected)
+        self.assertEqual(parse_hypothesis("unknown layout"), {})
+        self.assertEqual(parse_hypothesis(None), {})
+        self.assertEqual(parse_hypothesis("category=mixed; category=collection-oriented; truncated=2"), {"Truncated nodes": "2"})
+        self.assertEqual(parse_hypothesis("dominant_share=NaN; internal=unknown; truncated=4"), {"Truncated nodes": "4"})
+        at = self.app()
+        at.radio(key="page").set_value("Cluster Inspector").run()
+        at.selectbox(key="cluster_id").set_value(cid).run()
+        self.assertFalse(at.exception)
+        self.assertEqual({m.label: m.value for m in at.metric}, expected)
+        full = self.collapsed(at, "Full stored structural hypothesis")
+        self.assertIn(hypothesis, [item.value for item in full.markdown])
+        members = pd.DataFrame(detail["members"])[["gid", "role", "priority_score", "evidence"]]
+        self.assert_table(at, members.head(15))
+        self.assert_table(self.collapsed(at, f"Show all {len(members)} members"), members)
+        # Inject only presentation text; membership/action semantics remain untouched.
+        unexpected = "Unexpected hypothesis format; original text must remain intact."
+        changed = {**detail, "cluster": {**detail["cluster"], "hypothesis": unexpected}}
+        with patch.object(Analyst, "inspect_cluster", return_value=changed):
+            at.run()
+        self.assertFalse(at.exception)
+        self.assertEqual(len(at.metric), 0)
+        self.assertIn(unexpected, [m.value for m in self.collapsed(at, "Full stored structural hypothesis").markdown])
+        small = int(self.data["clusters"].loc[self.data["clusters"].n_nodes <= 15].iloc[0].cluster_id)
+        at.selectbox(key="cluster_id").set_value(small).run()
+        self.assertFalse(at.exception)
+        frame = pd.DataFrame(Analyst(self.data).inspect_cluster(small)["members"])[["gid", "role", "priority_score", "evidence"]]
+        self.assert_table(at, frame)
+        self.assertFalse(any(v.label.endswith(" members") for v in at.expander))
+
+    def test_agent_human_results(self):
+        agent = Analyst(self.data)
+        normal = self.nodes.iloc[0]
+        actions = [("inspect_node", normal.gid), ("inspect_cluster", str(normal.cluster_id)),
+                   ("get_top_priority", "10"), ("get_neighbors", normal.gid),
+                   ("explain_node", normal.gid),
+                   ("explain_node", self.nodes[self.nodes.is_seed].iloc[0].gid),
+                   ("explain_node", self.nodes[self.nodes.truncated_by_depth].iloc[0].gid)]
+        at = self.app()
+        at.radio(key="page").set_value("Agentic Analyst").run()
+        for action, value in actions:
+            with self.subTest(action=action, value=value):
+                at.selectbox[0].set_value(action)
+                at.text_input[0].set_value(value)
+                at.button[0].click().run()
+                self.assertFalse(at.exception)
+                expected = agent.dispatch(action, value)
+                result = expected["data"]
+                raw = self.collapsed(at, "Raw structured result")
+                self.assertEqual(json.loads(raw.json[0].value), result)
+                self.assertEqual(at.code[0].value, "\n".join(expected["trace"]))
+                if action == "explain_node":
+                    self.assertIn(result["explanation"], [v.value for v in at.markdown])
+                    self.assertEqual([v.value for v in at.warning], result["limitations"])
+                elif action == "inspect_node":
+                    self.assert_table(at, pd.DataFrame([result])[["gid", "role", "role_score", "priority_score", "evidence"]])
+                elif action == "inspect_cluster":
+                    self.assert_table(at, pd.DataFrame([result["cluster"]])[["cluster_id", "n_nodes", "n_seed", "sum_kzt_internal"]])
+                else:
+                    self.assert_table(at, pd.DataFrame(result).head(15) if action == "get_neighbors" else pd.DataFrame(result))
+
     def test_dashboard_node_cluster_agent_paths(self):
         at = self.app()
         self.assertEqual(len(at.exception), 0)
@@ -198,7 +320,13 @@ class UISmokeTests(unittest.TestCase):
         fig = local_graph(self.data, gid)
         edges = self.data["edges"]
         expected = edges[(edges.src == gid) | (edges.dst == gid)]
+        all_expected = expected.copy()
+        expected = expected.assign(_src=expected.src.map(int), _dst=expected.dst.map(int)).sort_values(
+            ["sum_kzt", "n_tx", "_src", "_dst"], ascending=[False, False, True, True]).head(30)
         actual = fig.layout.meta["observed_edges"]
+        self.assertEqual(actual, expected[["src", "dst", "sum_kzt", "n_tx"]].to_dict("records"))
+        self.assertLessEqual(len(actual), 30)
+        self.assertTrue({(r["src"], r["dst"]) for r in actual} <= set(zip(all_expected.src, all_expected.dst)))
         self.assertEqual({(r["src"], r["dst"], r["sum_kzt"], r["n_tx"]) for r in actual},
                          set(expected[["src", "dst", "sum_kzt", "n_tx"]].itertuples(index=False, name=None)))
         self.assertEqual(len(fig.layout.annotations), len(expected))
@@ -216,6 +344,10 @@ class UISmokeTests(unittest.TestCase):
             self.assertIn("priority_score=", tooltip)
         isolated = self.nodes[(self.nodes.in_deg + self.nodes.out_deg) == 0].iloc[0].gid
         self.assertIsNone(local_graph(self.data, isolated))
+        small = self.nodes[(self.nodes.in_deg + self.nodes.out_deg).between(1, 30)].iloc[0].gid
+        actual_small = local_graph(self.data, small).layout.meta["observed_edges"]
+        expected_small = edges[(edges.src == small) | (edges.dst == small)]
+        self.assertEqual({(r["src"], r["dst"]) for r in actual_small}, set(zip(expected_small.src, expected_small.dst)))
 
     def test_missing_and_malformed_ui(self):
         import streamlit as st
