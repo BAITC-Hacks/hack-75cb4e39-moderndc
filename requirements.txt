@@ -1,0 +1,7 @@
+# Проверенное окружение этапа 1 (Python 3.14.7).
+pandas==3.0.6
+pyarrow==25.0.1
+networkx==3.7
+numpy==2.3.5
+# NetworkX PageRank использует scipy.
+scipy==1.18.1
